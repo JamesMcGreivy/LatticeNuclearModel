@@ -5,7 +5,7 @@ import itertools
 from torch.multiprocessing import Pool
 
 from lattice import NuclearLattice
-from interactions import get_full_interaction
+from interactions import build_full_interaction
 from data.data import get_nuclear_data
 
 from bayes_opt import BayesianOptimization, SequentialDomainReductionTransformer
@@ -16,26 +16,20 @@ from bayes_opt.util import load_logs
 def get_equilibrium_binding_mse(args):
     N, Z, a_list_mm, a_list_mp, a_list_pm, a_list_pp, a_list_coulomb = args
     
-    f_interaction = get_full_interaction(a_list_mm, a_list_mp, a_list_pm, a_list_pp, a_list_coulomb)
-    
+    V_interaction = build_full_interaction(a_list_mm, a_list_mp, a_list_pm, a_list_pp, a_list_coulomb)
     
     # ~~ ! Lattice Parameters ! ~~ #
-    num_adjacent = 1
-    lattice_width = 30
-    state_space_dim = 3
+    bounds = [[-10, 10], [-10, 10], [-10, 10]]
     
-    lattice = NuclearLattice(N, Z, lattice_width=lattice_width, state_space_dim=state_space_dim)
+    lattice = NuclearLattice(Z, N, V_interaction)
     
-    prev_E_tot = torch.inf
-    E_tot = 1e9
-    while E_tot < prev_E_tot:
-        prev_E_tot = E_tot
-        E_tot = lattice.step(f_interaction, num_adjacent)
+    stop_flag = False
+    while not stop_flag:
+        stop_flag = lattice.step()
+    E_tot = lattice.E_tot()
     
     dat = get_nuclear_data()
     E_tot_actual = -float(dat[(dat['z'] == Z) & (dat['n'] == N)]['binding'].iloc[0])
-    
-    print(f"N: {N}, Z: {Z}, Actual : {E_tot_actual/(N+Z)}, Calculated : {E_tot/(N+Z)}")
     
     return ((E_tot - E_tot_actual)/(N + Z))**2.0
 

@@ -4,49 +4,37 @@ import numpy as np
 import itertools
 
 class NuclearLattice(nn.Module):
-    
     """
     Class representing a nuclear lattice simulation.
     -> Z : number of protons
     -> N : number of neutrons
-    -> f_interaction(r_i, spin_i, isospin_i, r_j, spin_j, isospin_j) : interaction term
+    -> V_interaction(state, lattice) : given interaction between state and the lattice of all possible states
     """
-    def __init__(self, Z, N, f_interaction, lattice_width=10, state_space_dim=2):
+    def __init__(self, Z, N, V_interaction, boundaries=[[-10, 10], [-10, 10], [-10, 10]]):
         super().__init__()
         self.N = N
-        self.Z = Z 
+        self.Z = Z
         self.A = N + Z
-        self.f_interaction = self._wrap_f_interaction(f_interaction)
+        self.V_interaction = V_interaction
         
-        self.lattice_width = lattice_width
-        self.state_space_dim = state_space_dim
-        self.boundaries = torch.tensor(state_space_dim * [[-lattice_width//2, lattice_width//2]] + 2 * [[-0.5, 0.5]])
+        self.states = self._dense_init(self.N, self.Z, len(boundaries)) # a list of every particle's position / spin / isospin
+        
+        boundaries = torch.tensor(boundaries)
+        self.boundaries = torch.concat((boundaries, torch.tensor([[-0.5, 0.5], [-0.5, 0.5]]))) # need to add on the boundary conditions for spin and isospin
         self.shape = torch.tensor([int(bound[1] - bound[0] + 1) for bound in self.boundaries])
         
-        self.states = self._dense_initialization(self.N, self.Z, self.state_space_dim) # a list of every particle's position / spin / isospin
-        self.mean_field = torch.tensor(torch.prod(self.shape) * [float('nan')]).reshape(*self.shape) # contains an index for every possible position / spin / isospin, initially all nans
-    
-    """
-    Pauli blocking prevents any two nucleons with identical quantum numbers
-    """
-    def _pauli_blocking(self, r1, spin1, isospin1, r2, spin2, isospin2):
-        state_dist = torch.linalg.norm(r1 - r2) + torch.abs(spin1 - spin2) + torch.abs(isospin1 - isospin2)
-        if state_dist < 1e-3:
-            return 1e6
-        else:
-            return 0.0
+        # a tuple of meshes which track the position (lattice[0:-2]), spin (lattice[-2]), and isospin (lattice[-1]) of each point in the lattice
+        self.lattice = torch.meshgrid(*[torch.arange(bound[0], bound[1] + 1) for bound in self.boundaries]) 
 
-    """
-    """
-    def _wrap_f_interaction(self, f_interaction):
-        def new_f_interaction(r1, spin1, isospin1, r2, spin2, isospin2):
-            return self._pauli_blocking(r1, spin1, isospin1, r2, spin2, isospin2) + f_interaction(r1, spin1, isospin1, r2, spin2, isospin2)
-        return new_f_interaction
-    
+        # For every possible lattice site:
+        # - mean_field stores the potential energy at that lattice site
+        # - population stores the number of particles at that lattice site
+        self.mean_field, self.population = self._init_mean_field(self.states, self.V_interaction) 
+
     """
     Initializes every neutron and proton directly at the origin with spin = isospin
     """
-    def _dense_initialization(self, N, Z, state_space_dim):      
+    def _dense_init(self, N, Z, state_space_dim):      
         neutron_positions = torch.zeros((N, state_space_dim))
         neutron_spins = torch.zeros((N, 1)) - 0.5
         neutron_isospins = torch.zeros((N, 1)) - 0.5
@@ -61,79 +49,71 @@ class NuclearLattice(nn.Module):
 
     """
     """
-    def _calc_field_at(self, site):
-        r_site, spin_site, isospin_site = site[0:self.state_space_dim], site[-2], site[-1]
-        field = 0.0
-        for state in self.states:
-            r_i, spin_i, isospin_i = state[0:self.state_space_dim], state[-2], state[-1]
-            field += self.f_interaction(r_i, spin_i, isospin_i, r_site, spin_site, isospin_site)
-        return field
+    def _init_mean_field(self, states, V_interaction):
+        mean_field = torch.zeros(*self.shape)
+        population = torch.zeros(*self.shape)
+        for state in states:
+            mean_field += V_interaction(state, self.lattice)
+            idx = (state - self.boundaries[:,0]).int()
+            population[*idx] += 1
+        return mean_field, population
 
     """
     """
-    def get_mean_field_at(self, site):
-        idx = (site - self.boundaries[:,0]).int()
-        if torch.isnan(self.mean_field[*idx]):
-            self.mean_field[*idx] = self._calc_field_at(site)
-        return self.mean_field[*idx]
-
-    """
-    """
-    def set_mean_field_at(self, site, value):
-        idx = (site - self.boundaries[:,0]).int()
-        self.mean_field[*idx] = value
-
-    
-    """
-    Prevents any nucleon from escaping the lattice boundaries
-    """
-    def _outside_boundaries(self, state):
-        if torch.any(state < self.boundaries[:,0]) or torch.any(state > self.boundaries[:,1]):
-            return True
-        else:
-            return False
+    def get_mean_field_at(self, state):
+        return 2
     
     """
     """
-    def step(self, dist=1):
+    def step(self):
+        # Helper tensors
+        stop_flag = torch.zeros(len(self.states))
+        zero_lattice = torch.zeros(*self.shape)
+        
+        E_tot = 0.0
         for i, state in enumerate(self.states):
-            r, spin, isospin = state[0:self.state_space_dim], state[-2], state[-1]
+            idx = (state - self.boundaries[:,0]).int()
             
-            # iterate over every lattice site within dist in state space, any spin, same isospin, finding the lowest energy lattice site
-            f_new = np.inf
-            site_new = state
-            bounds = self.state_space_dim * [range(2*dist + 1)] + [range(2)]
-            for idx in itertools.product(*bounds):
-                site = torch.tensor(idx + (isospin,))
-                site[0:self.state_space_dim] += (r - dist)
-                site[-2] -= 0.5
-                
-                f = self.get_mean_field_at(site)
-                if f < f_new and not self._outside_boundaries(site):
-                    f_new = f
-                    site_new = site
+            zero_lattice[*idx] = 1
+            pauli_blocking = 1e12 * (self.population - zero_lattice)
+            zero_lattice[*idx] = 0
 
-            r_new, spin_new, isospin_new = site_new[0:self.state_space_dim], site_new[-2], site_new[-1]
+            # Remove the contribution of this state to the mean field
+            new_mean_field = self.mean_field - self.V_interaction(state, self.lattice)
+            # the potential that state sees is the new mean field + pauli blocking
+            V_state = new_mean_field + pauli_blocking
             
-            active_indexes = torch.vstack(torch.where(torch.logical_not(torch.isnan(self.mean_field)))).T
-            for idx in active_indexes:
-                site = self.boundaries[:,0] + idx
-                r_site, spin_site, isospin_site = site[0:self.state_space_dim], site[-2], site[-1]
-                self.mean_field[*idx] -= self.f_interaction(r, spin, isospin, r_site, spin_site, isospin_site)
-                self.mean_field[*idx] += self.f_interaction(r_new, spin_new, isospin_new, r_site, spin_site, isospin_site)
+            isospin_idx = (state[-1] - self.boundaries[-1,0]).int()
+            new_idx = torch.tensor(torch.unravel_index(V_state[...,isospin_idx].argmin(), V_state.shape[0:-1]) + (isospin_idx,))
 
-            self.states[i] = site_new
+            # If the new index is equal to the old index, don't do anything
+            if torch.sum(torch.abs(new_idx - idx)) < 0.5:
+                stop_flag[i] = 1
+                continue
+
+            new_state = self.boundaries[:,0] + new_idx
+
+            self.population[*idx] -= 1
+            self.population[*new_idx] += 1
+            self.mean_field = new_mean_field + self.V_interaction(new_state, self.lattice)
+            self.states[i] = new_state
+
+        return torch.all(stop_flag)
 
     """
     Computes the total energy of the system
     """
     def E_tot(self):
         E_tot = 0.0
-        for i in range(self.A):
-            for j in range(i, self.A):
-                if i == j:
-                    continue
-                r_i, spin_i, isospin_i = self.states[i,0:self.state_space_dim], self.states[i,-2], self.states[i,-1]
-                r_j, spin_j, isospin_j = self.states[j,0:self.state_space_dim], self.states[j,-2], self.states[j,-1]
-                E_tot += self.f_interaction(r_i, spin_i, isospin_i, r_j, spin_j, isospin_j)
-        return E_tot
+        for state in self.states:
+            idx = (state - self.boundaries[:,0]).int()
+            slices = [slice(i, i+1) for i in idx]
+            
+            pauli_blocking = 1e12 * (self.population[*idx] - 1)
+            E_tot += self.mean_field[*idx] - self.V_interaction(state, [lat[*slices] for lat in self.lattice]) + pauli_blocking
+        return E_tot.item()
+
+            
+
+
+        
