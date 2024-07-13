@@ -10,8 +10,10 @@ class NuclearLattice(nn.Module):
     -> N : number of neutrons
     -> V_interaction(state, lattice) : given interaction between state and the lattice of all possible states
     """
-    def __init__(self, Z, N, V_interaction, boundaries=[[-10, 10], [-10, 10], [-10, 10]]):
+    def __init__(self, Z, N, V_interaction, boundaries=[[-10, 10], [-10, 10], [-10, 10]], device="cpu"):
         super().__init__()
+        self.device = device
+        
         self.N = N
         self.Z = Z
         self.A = N + Z
@@ -19,30 +21,34 @@ class NuclearLattice(nn.Module):
         
         self.states = self._dense_init(self.N, self.Z, len(boundaries)) # a list of every particle's position / spin / isospin
         
-        boundaries = torch.tensor(boundaries)
-        self.boundaries = torch.concat((boundaries, torch.tensor([[-0.5, 0.5], [-0.5, 0.5]]))) # need to add on the boundary conditions for spin and isospin
-        self.shape = torch.tensor([int(bound[1] - bound[0] + 1) for bound in self.boundaries])
+        boundaries = torch.tensor(boundaries, device=device)
+        self.boundaries = torch.concat(
+            (boundaries, torch.tensor([[-0.5, 0.5], [-0.5, 0.5]], device=device))
+        ) # need to add on the boundary conditions for spin and isospin
+        self.shape = torch.tensor([int(bound[1] - bound[0] + 1) for bound in self.boundaries], device=device)
         
         # a tuple of meshes which track the position (lattice[0:-2]), spin (lattice[-2]), and isospin (lattice[-1]) of each point in the lattice
-        self.lattice = torch.meshgrid(*[torch.arange(bound[0], bound[1] + 1) for bound in self.boundaries]) 
+        self.lattice = torch.meshgrid(
+            *[torch.arange(bound[0], bound[1] + 1, device=device) for bound in self.boundaries], indexing='ij'
+        )
 
         # For every possible lattice site:
         # - mean_field stores the potential energy at that lattice site
         # - population stores the number of particles at that lattice site
-        self.mean_field, self.population = self._init_mean_field(self.states, self.V_interaction) 
+        self.mean_field, self.population = self._init_mean_field(self.states, self.V_interaction)
 
     """
     Initializes every neutron and proton directly at the origin with spin = isospin
     """
     def _dense_init(self, N, Z, state_space_dim):      
-        neutron_positions = torch.zeros((N, state_space_dim))
-        neutron_spins = torch.zeros((N, 1)) - 0.5
-        neutron_isospins = torch.zeros((N, 1)) - 0.5
+        neutron_positions = torch.zeros((N, state_space_dim), device=self.device)
+        neutron_spins = torch.zeros((N, 1), device=self.device) - 0.5
+        neutron_isospins = torch.zeros((N, 1), device=self.device) - 0.5
         neutron_states = torch.hstack((neutron_positions, neutron_spins, neutron_isospins))
 
-        proton_positions = torch.zeros((Z, state_space_dim))
-        proton_spins = torch.zeros((Z, 1)) + 0.5
-        proton_isospins = torch.zeros((Z, 1)) + 0.5
+        proton_positions = torch.zeros((Z, state_space_dim), device=self.device)
+        proton_spins = torch.zeros((Z, 1), device=self.device) + 0.5
+        proton_isospins = torch.zeros((Z, 1), device=self.device) + 0.5
         proton_states = torch.hstack((proton_positions, proton_spins, proton_isospins))
         
         return torch.vstack((neutron_states, proton_states))
@@ -50,8 +56,8 @@ class NuclearLattice(nn.Module):
     """
     """
     def _init_mean_field(self, states, V_interaction):
-        mean_field = torch.zeros(*self.shape)
-        population = torch.zeros(*self.shape)
+        mean_field = torch.zeros(*self.shape, device=self.device)
+        population = torch.zeros(*self.shape, device=self.device)
         for state in states:
             mean_field += V_interaction(state, self.lattice)
             idx = (state - self.boundaries[:,0]).int()
@@ -66,9 +72,8 @@ class NuclearLattice(nn.Module):
     """
     """
     def step(self):
-        # Helper tensors
-        stop_flag = torch.zeros(len(self.states))
-        zero_lattice = torch.zeros(*self.shape)
+        # Helper tensor
+        zero_lattice = torch.zeros(*self.shape, device=self.device)
         
         E_tot = 0.0
         for i, state in enumerate(self.states):
@@ -84,11 +89,12 @@ class NuclearLattice(nn.Module):
             V_state = new_mean_field + pauli_blocking
             
             isospin_idx = (state[-1] - self.boundaries[-1,0]).int()
-            new_idx = torch.tensor(torch.unravel_index(V_state[...,isospin_idx].argmin(), V_state.shape[0:-1]) + (isospin_idx,))
+            new_idx = torch.tensor(
+                torch.unravel_index(V_state[...,isospin_idx].argmin(), V_state.shape[0:-1]) + (isospin_idx,), device=self.device
+            )
 
             # If the new index is equal to the old index, don't do anything
             if torch.sum(torch.abs(new_idx - idx)) < 0.5:
-                stop_flag[i] = 1
                 continue
 
             new_state = self.boundaries[:,0] + new_idx
@@ -97,8 +103,6 @@ class NuclearLattice(nn.Module):
             self.population[*new_idx] += 1
             self.mean_field = new_mean_field + self.V_interaction(new_state, self.lattice)
             self.states[i] = new_state
-
-        return torch.all(stop_flag)
 
     """
     Computes the total energy of the system

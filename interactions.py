@@ -17,8 +17,8 @@ def get_nuclear_interaction(a_list):
     y_list = torch.tensor(a_list)
     def V(r):
         near = torch.sum(torch.stack([y * torch.logical_and(r > x_boundaries[i], r <= x_boundaries[i + 1]) for i, y in enumerate(y_list)]), axis = 0)
-        far = torch.nan_to_num(x_boundaries[-1]**2.0 * y_list[-1] / r**2.0) * (r > x_boundaries[-1])
-        return near + far
+        #far = torch.nan_to_num(x_boundaries[-1]**2.0 * y_list[-1] / r**2.0) * (r > x_boundaries[-1])
+        return near# + far
     return V
 
 def get_coulomb_interaction(a_list):
