@@ -19,7 +19,7 @@ def get_equilibrium_binding_mse(args):
     V_interaction = build_full_interaction(a_list_mm, a_list_mp, a_list_pm, a_list_pp, a_list_coulomb)
 
     # ~~ ! Lattice Parameters ! ~~ #
-    bounds = [[-5, 5], [-5, 5], [-5, 5]]
+    bounds = [[-4, 4], [-4, 4], [-4, 4]]
     lattice = NuclearLattice(Z, N, V_interaction, bounds, device=device)
 
     E_tot = torch.inf
@@ -35,31 +35,25 @@ def get_equilibrium_binding_mse(args):
 
     dat = get_nuclear_data()
     E_tot_actual = -float(dat[(dat['z'] == Z) & (dat['n'] == N)]['binding'].iloc[0])
-
-    print(f"Z : {Z}, N : {N}, E_tot (pred) : {E_tot:.3f}, E_tot (actual) : {E_tot_actual:.3f}")
     return (E_tot - E_tot_actual)**2.0
 
-def optimize_interactions(
-    a_mm_0, a_mm_1, a_mm_2, a_mm_3,
-    a_mp_0, a_mp_1, a_mp_2, a_mp_3,
-    a_pm_0, a_pm_1, a_pm_2, a_pm_3,
-            a_pp_1, a_pp_2, a_pp_3,
-    a_c_1, a_c_2
-):
+def optimize_interactions(args):
+    a_mm_0, a_mm_1, a_mp_0, a_mp_1, a_pm_0, a_pm_1, a_pp_1, a_c_0, a_c_1 = args
+    
     # The value of a_pp_0 is arbitrary since two nucleons with the same spin and isospin
     # cannot exist at zero distance
     a_pp_0 = a_pp_1
     
     # Package into lists
-    a_list_mm = [a_mm_0, a_mm_1, a_mm_2, a_mm_3]
-    a_list_mp = [a_mp_0, a_mp_1, a_mp_2, a_mp_3]
-    a_list_pm = [a_pm_0, a_pm_1, a_pm_2, a_pm_3]
-    a_list_pp = [a_pp_0, a_pp_1, a_pp_2, a_pp_3]
-    a_list_coulomb = [a_c_1, a_c_2]
+    a_list_mm = [a_mm_0, a_mm_1]
+    a_list_mp = [a_mp_0, a_mp_1]
+    a_list_pm = [a_pm_0, a_pm_1]
+    a_list_pp = [a_pp_0, a_pp_1]
+    a_list_coulomb = [a_c_0, a_c_1]
     
     # ~~ ! Parameters ! ~~ #
-    z_min = 8
-    z_max = 20
+    z_min = 12
+    z_max = 14
     device = "cpu"
     processes = 70
     
@@ -72,56 +66,29 @@ def optimize_interactions(
                 get_equilibrium_binding_mse, 
                 ((N, Z, a_list_mm, a_list_mp, a_list_pm, a_list_pp, a_list_coulomb, device) for Z, N in zip(dat['z'], dat['n']))
             )
-        
-        print(f"MSE: {np.mean(result):.3f}")
-        return -np.mean(result)
-    
-    if device in "cuda":
+    elif device in "cuda":
         result = []
         for Z, N in zip(dat['z'], dat['n']):
             result.append(get_equilibrium_binding_mse((N, Z, a_list_mm, a_list_mp, a_list_pm, a_list_pp, a_list_coulomb, device)))
         result = np.array(result)
-        print(f"MSE: {np.mean(result):.3f}")
-        return -np.mean(result)
+    
+    print(f"MSE: {np.mean(result):.3f}")
+    return np.mean(result)
 
+from scipy.optimize import minimize
+    
 if __name__ == "__main__":
+    # a_mm_0, a_mm_1, a_mp_0, a_mp_1, a_pm_0, a_pm_1, a_pp_1, a_c_0, a_c_1
+    initial_guess = [-2, -1, -2, -1, -2, -1, -1, 1, 0.5]
+    bounds = ((-10, 0), 
+              (-10, 0), 
+              (-10, 0), 
+              (-10, 0), 
+              (-10, 0),
+              (-10, 0),
+              (-10, 0),
+              (0, 10),
+              (0, 10))
     # Bounded region of parameter space
-    pbounds = {
-        'a_mm_0': (-6, -1), 
-        'a_mm_1': (-6, 0),
-        'a_mm_2': (-6, 0),
-        'a_mm_3': (-6, 0),
-        
-        'a_mp_0': (-6, -1),
-        'a_mp_1': (-6, 0),
-        'a_mp_2': (-6, 0),
-        'a_mp_3': (-6, 0),
-        
-        'a_pm_0': (-6, -1),
-        'a_pm_1': (-6, 0),
-        'a_pm_2': (-6, 0),
-        'a_pm_3': (-6, 0),
-        
-        'a_pp_1': (-6, -1),
-        'a_pp_2': (-6, 0),
-        'a_pp_3': (-6, 0),
-        
-        'a_c_1' : (2, 8),
-        'a_c_2' : (0, 6),
-    }
-    
-    i = 2
-
-    #bounds_transformer = SequentialDomainReductionTransformer(eta=0.99, minimum_window=1e-4)
-    optimizer = BayesianOptimization(
-        f=optimize_interactions, 
-        pbounds=pbounds,
-        random_state=i,
-        #bounds_transformer=bounds_transformer,
-        verbose=1,
-    )
-    
-    load_logs(optimizer, logs=["./logs.log.json"])
-    logger = JSONLogger(path=f"./logs{i}.log", reset=False)
-    optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
-    optimizer.maximize(init_points=0, n_iter=800)
+    result = minimize(optimize_interactions, initial_guess, bounds=bounds, options={'eps':0.1})
+    print(result.x)
